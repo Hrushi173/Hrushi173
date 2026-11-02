@@ -28,7 +28,7 @@ async function news(symbol='stock market'){const q=String(symbol).replace(/\.(NS
 async function route(req,res){
   const u=new URL(req.url,'https://axiom.invalid'); const p=u.pathname;
   if(req.method!=='GET'){res.statusCode=405;return{error:'Method not allowed'};}
-  if(p==='/health')return{ok:true,service:'AxiomDesk Vercel data service',time:new Date().toISOString()};
+  if(p==='/health'||p==='/api/health')return{ok:true,service:'AxiomDesk Vercel data service',time:new Date().toISOString()};
   if(p==='/api/market'){
     const type=u.searchParams.get('type');
     if(type==='search')return{results:await search(u.searchParams.get('q')||'')};
