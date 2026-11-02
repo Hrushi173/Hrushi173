@@ -15,9 +15,16 @@ function calcRsi(values) {
   for(let i=values.length-14;i<values.length;i++){const d=values[i]-values[i-1];if(d>0)gains+=d;else losses-=d;}
   return losses?+(100-100/(1+gains/losses)).toFixed(2):100;
 }
+async function binanceQuote(symbol) {
+  const d=await upstream('https://data-api.binance.vision/api/v3/ticker/24hr?symbol='+encodeURIComponent(symbol),5000);
+  const price=Number(d.lastPrice),previous=Number(d.prevClosePrice),change=Number(d.priceChange),changePercent=Number(d.priceChangePercent);
+  if(!Number.isFinite(price))throw new Error('Binance returned no quote for '+symbol);
+  return{symbol,name:symbol.replace('USDT',' / USDT'),exchange:'Binance Spot',currency:'USDT',price,change:Number.isFinite(change)?change:null,changePercent:Number.isFinite(changePercent)?changePercent:null,previous:Number.isFinite(previous)?previous:null,high:Number(d.highPrice)||null,low:Number(d.lowPrice)||null,volume:Number(d.volume)||null,marketCap:null,pe:null,dividendYield:null,rsi14:null,distanceHigh52:null,high52:null,low52:null,fiftyTwoWeekHigh:null,fiftyTwoWeekLow:null,timestamp:Math.floor(Number(d.closeTime||Date.now())/1000),source:'Binance Spot',delay:'Live exchange data'};
+}
 async function quote(symbol) {
   const s=String(symbol||'').trim().toUpperCase();
   if(!/^[A-Z0-9^=._-]{1,28}$/.test(s))throw new Error('Invalid ticker symbol');
+  if(/^[A-Z0-9]{2,20}USDT$/.test(s))return binanceQuote(s);
   const data=await upstream('https://query1.finance.yahoo.com/v8/finance/chart/'+encodeURIComponent(s)+'?range=1y&interval=1d',20000);
   const r=data.chart?.result?.[0]; if(!r)throw new Error(data.chart?.error?.description||('No quote returned for '+s));
   const m=r.meta||{},closes=(r.indicators?.quote?.[0]?.close||[]).filter(Number.isFinite),price=m.regularMarketPrice??closes.at(-1),prev=closes.length>1?closes.at(-2):(m.previousClose??m.chartPreviousClose);
