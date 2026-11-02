@@ -1,0 +1,9 @@
+{
+  "name": "axiomdesk-market-terminal",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "start": "node work/axiom-server.mjs"
+  }
+}
+
