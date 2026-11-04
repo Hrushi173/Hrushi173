@@ -12,10 +12,16 @@ async function upstream(url, ttl=15000) {
   const value=await response.json(); CACHE.set(key,{at:Date.now(),value}); return value;
 }
 function calcRsi(values) {
-  if(values.length<15)return null;
-  let gains=0,losses=0;
-  for(let i=values.length-14;i<values.length;i++){const d=values[i]-values[i-1];if(d>0)gains+=d;else losses-=d;}
-  return losses?+(100-100/(1+gains/losses)).toFixed(2):100;
+  const closes=values.filter(Number.isFinite);
+  if(closes.length<15)return null;
+  let avgGain=0,avgLoss=0;
+  for(let i=1;i<=14;i++){const change=closes[i]-closes[i-1];if(change>0)avgGain+=change;else avgLoss-=change;}
+  avgGain/=14;avgLoss/=14;
+  for(let i=15;i<closes.length;i++){const change=closes[i]-closes[i-1],gain=Math.max(0,change),loss=Math.max(0,-change);avgGain=(avgGain*13+gain)/14;avgLoss=(avgLoss*13+loss)/14;}
+  if(avgGain===0&&avgLoss===0)return 50;
+  if(avgLoss===0)return 100;
+  if(avgGain===0)return 0;
+  return +(100-100/(1+avgGain/avgLoss)).toFixed(2);
 }
 function technicals(r) {
   const q=r.indicators?.quote?.[0]||{}, close=q.close||[], high=q.high||[], low=q.low||[], open=q.open||[], volume=q.volume||[];
