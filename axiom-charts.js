@@ -27,11 +27,11 @@
     const widget=document.createElement('div');widget.className='tradingview-widget-container__widget';container.appendChild(widget);
     const credit=document.createElement('div');credit.className='axiom-tv-credit';
     const link=document.createElement('a');link.href='https://www.tradingview.com/symbols/'+encodeURIComponent(symbol.replace(':','-'))+'/';link.target='_blank';link.rel='noopener noreferrer';link.textContent=symbol+' chart';credit.append(link,document.createTextNode(' · powered by TradingView'));
-    host.append(container,credit);
+    host.appendChild(container);
     const script=document.createElement('script');script.type='text/javascript';script.async=true;
     script.src='https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js';
     script.textContent=JSON.stringify({autosize:true,symbol,interval:'D',timezone:/india/.test((document.querySelector('main .page-heading h1')?.textContent||'').toLowerCase())?'Asia/Kolkata':'Etc/UTC',theme:'dark',style:'1',locale:'en',allow_symbol_change:true,calendar:false,details:false,hide_side_toolbar:true,hide_top_toolbar:false,hide_legend:false,hide_volume:false,hotlist:false,save_image:false,withdateranges:true,backgroundColor:'#101820',gridColor:'rgba(129,154,174,0.12)',studies:[]});
-    host.appendChild(script);
+    widget.appendChild(script);host.appendChild(credit);
   }
   function scan(){document.querySelectorAll('.chart-panel').forEach(install)}
   new MutationObserver(scan).observe(document.documentElement,{childList:true,subtree:true,characterData:true});
