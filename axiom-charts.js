@@ -21,7 +21,7 @@
     return raw.includes(':')?raw:'NASDAQ:'+raw;
   }
   function mount(symbol){
-    if(symbol===activeSymbol&&overlay.querySelector('iframe'))return;
+    if(symbol===activeSymbol&&overlay.querySelector('.tradingview-widget-container'))return;
     activeSymbol=symbol;overlay.replaceChildren();
     const outer=document.createElement('div');outer.className='tradingview-widget-container';outer.style.cssText='width:100%;height:100%';
     const widget=document.createElement('div');widget.className='tradingview-widget-container__widget';widget.style.cssText='width:100%;height:100%';outer.appendChild(widget);overlay.appendChild(outer);
