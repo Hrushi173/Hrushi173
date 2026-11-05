@@ -45,7 +45,12 @@ async function completion(provider, model, role, context, maxTokens = 500) {
     } : { model, temperature:0.2, max_tokens:maxTokens, messages:[{role:'system',content:policy},{role:'user',content:context}] }),
     signal: AbortSignal.timeout(22000)
   });
-  if (!r.ok) { const e = new Error(provider.name + ' completion returned HTTP ' + r.status); e.gatewayStatus = r.status; throw e; }
+  if (!r.ok) {
+    const failure = await r.json().catch(() => ({}));
+    const detail = String(failure?.error?.message || '').replace(/[\r\n\t]+/g, ' ').replace(/(?:key|token)[=: ]+[A-Za-z0-9._-]{16,}/ig, '[redacted]').slice(0, 260);
+    const e = new Error(provider.name + ' completion returned HTTP ' + r.status + (detail ? ': ' + detail : ''));
+    e.gatewayStatus = r.status; throw e;
+  }
   const d = await r.json(), c = gemini ? d.candidates?.[0]?.content?.parts?.map(x=>x.text||'').join('') : d.choices?.[0]?.message?.content;
   const answer = Array.isArray(c) ? c.map(x => typeof x === 'string' ? x : x.text || '').join('') : String(c || '').trim();
   if (!answer) throw new Error('Empty agent response');
@@ -128,12 +133,12 @@ async function handler(req, res) {
     ];
     const reports = await Promise.all(roles.map(async ([name, role]) => {
       try { return { name, status:'complete', report:await completion(aiProvider, model, role, prompt, 420) }; }
-      catch (e) { return { name, status:'unavailable', report:'Agent unavailable: provider request failed' + (e.gatewayStatus ? ' (HTTP ' + e.gatewayStatus + ')' : '') + '. No conclusion is supplied.' }; }
+      catch (e) { return { name, status:'unavailable', report:'Agent unavailable: ' + e.message + '. No conclusion is supplied.' }; }
     }));
     const synthesisContext = JSON.stringify({ ticker:symbol, company:facts, forecastAndRisk:s, sourceErrors:data.errors, reports });
     let trader;
     try { trader = await completion(aiProvider, model, 'You are the final paper-trading desk agent. Reconcile all reports, surface disagreement, and return: action (WATCH / PAPER LONG / PAPER SHORT / NO TRADE), conditional entry trigger, stop, target, reward:risk, thesis invalidation, and what to monitor during the '+days+'-session horizon. Never state that a live trade was executed. If evidence is weak, agents conflict, quote/history is incomplete, or data is stale, choose WATCH or NO TRADE. Do not override the deterministic risk limits.', synthesisContext, 600); }
-    catch (e) { trader = 'Final trader synthesis unavailable' + (e.gatewayStatus ? ' (provider HTTP ' + e.gatewayStatus + ')' : '') + '. Do not open a paper position; review the agent reports and deterministic risk values manually.'; }
+    catch (e) { trader = 'Final trader synthesis unavailable: ' + e.message + '. Do not open a paper position; review the agent reports and deterministic risk values manually.'; }
     return send(res, 200, { symbol, model, provider:aiProvider.name, horizonDays:days, generatedAt:new Date().toISOString(), facts, historicalRisk:s, sector:sectorFor(symbol), reports, trader:{name:'Trader / portfolio manager',status:trader.startsWith('Final trader synthesis unavailable')?'unavailable':'complete',report:trader,paperOnly:true}, sources:{quote:facts.source||null,headlines:newsFacts.map(x=>({publisher:x.publisher,publishedAt:x.publishedAt,url:x.url}))}, dataCoverage:data.errors });
   } catch (e) {
     return send(res, 502, { error: 'The research team could not complete this run. Check the gateway/model and market-data connection, then retry.' });
