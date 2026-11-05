@@ -19,7 +19,7 @@ function send(res, status, body) { res.statusCode = status; res.setHeader('cache
 function bodyOf(req) { if (req.body && typeof req.body === 'object') return req.body; try { return JSON.parse(req.body || '{}'); } catch { return {}; } }
 async function models(key) {
   const r = await fetch(GATEWAY + '/models', { headers: { authorization: 'Bearer ' + key, accept: 'application/json' }, signal: AbortSignal.timeout(15000) });
-  if (!r.ok) throw new Error('AgentRouter model list returned HTTP ' + r.status);
+  if (!r.ok) { const e = new Error('Gateway HTTP ' + r.status); e.gatewayStatus = r.status; throw e; }
   const d = await r.json();
   return (Array.isArray(d.data) ? d.data : []).map(x => ({ id: String(x.id || ''), name: String(x.name || x.id || '') })).filter(x => /^[A-Za-z0-9._:/-]{2,120}$/.test(x.id)).slice(0, 100);
 }
@@ -85,7 +85,7 @@ async function handler(req, res) {
   if (!key) return send(res, 503, { error: 'AI gateway is not configured.' });
   if (req.method === 'GET') {
     try { return send(res, 200, { models: await models(key) }); }
-    catch (e) { return send(res, 502, { error: 'Could not load AgentRouter models. Check the server-side gateway configuration.' }); }
+    catch (e) { return send(res, 502, { error: e.gatewayStatus ? 'AgentRouter model discovery returned HTTP ' + e.gatewayStatus + '.' : 'AgentRouter model discovery failed. Check gateway connectivity.' }); }
   }
   if (req.method !== 'POST') return send(res, 405, { error: 'Use GET to list models or POST to run the research team.' });
   if (!rateAllowed(req)) return send(res, 429, { error: 'Research-team limit reached. Try again later.' });
@@ -126,3 +126,4 @@ async function handler(req, res) {
   }
 }
 module.exports = handler;
+
