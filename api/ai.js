@@ -27,10 +27,12 @@ async function models(provider) {
   const r = await fetch(provider.base + '/models', { headers: { authorization: 'Bearer ' + provider.key, accept: 'application/json' }, signal: AbortSignal.timeout(15000) });
   if (!r.ok) { const e = new Error('Gateway HTTP ' + r.status); e.gatewayStatus = r.status; throw e; }
   const d = await r.json();
-  return (Array.isArray(d.data) ? d.data : []).map(x => {
+  const rows = (Array.isArray(d.data) ? d.data : []).map(x => {
     const id = String(x.id || '').replace(/^models\//, '');
     return { id, name: String(x.name || id).replace(/^models\//, '') };
-  }).filter(x => /^[A-Za-z0-9._:/-]{2,120}$/.test(x.id) && /^(gemini|gemma)[-.:]/i.test(x.id) && !/(image|tts|transcri|embed|audio|live)/i.test(x.id)).slice(0, 40);
+  }).filter(x => /^[A-Za-z0-9._:/-]{2,120}$/.test(x.id) && /^(gemini|gemma)[-.:]/i.test(x.id) && !/(^gemini-2\.5|image|tts|transcri|embed|audio|live|robotics|computer-use|nano-banana)/i.test(x.id));
+  const rank = id => id === 'gemini-3.8-flash' ? 0 : /^gemini-3\.[0-9]+-flash(?:$|-)/.test(id) ? 1 : /flash/i.test(id) ? 2 : 3;
+  return rows.sort((a,b)=>rank(a.id)-rank(b.id)||b.id.localeCompare(a.id)).slice(0,40);
 }
 async function completion(provider, model, role, context, maxTokens = 500) {
   const policy = role + ' Use only supplied evidence. Explicitly label missing facts and uncertainty. Do not invent data, citations, catalysts, or price targets. Keep the report concise and decision-useful. This is research, not personalized financial advice.';
