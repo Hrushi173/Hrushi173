@@ -27,7 +27,10 @@ async function models(provider) {
   const r = await fetch(provider.base + '/models', { headers: { authorization: 'Bearer ' + provider.key, accept: 'application/json' }, signal: AbortSignal.timeout(15000) });
   if (!r.ok) { const e = new Error('Gateway HTTP ' + r.status); e.gatewayStatus = r.status; throw e; }
   const d = await r.json();
-  return (Array.isArray(d.data) ? d.data : []).map(x => ({ id: String(x.id || ''), name: String(x.name || x.id || '') })).filter(x => /^[A-Za-z0-9._:/-]{2,120}$/.test(x.id)).slice(0, 100);
+  return (Array.isArray(d.data) ? d.data : []).map(x => {
+    const id = String(x.id || '').replace(/^models\//, '');
+    return { id, name: String(x.name || id).replace(/^models\//, '') };
+  }).filter(x => /^[A-Za-z0-9._:/-]{2,120}$/.test(x.id) && /^(gemini|gemma)[-.:]/i.test(x.id) && !/(image|tts|transcri|embed|audio|live)/i.test(x.id)).slice(0, 40);
 }
 async function completion(provider, model, role, context, maxTokens = 500) {
   const r = await fetch(provider.base + '/chat/completions', {
@@ -132,3 +135,4 @@ async function handler(req, res) {
   }
 }
 module.exports = handler;
+
