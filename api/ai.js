@@ -48,7 +48,7 @@ async function completion(provider, model, role, context, maxTokens = 500, fallb
         body: JSON.stringify(gemini ? {
           system_instruction:{parts:[{text:policy}]},
           contents:[{role:'user',parts:[{text:context}]}],
-          generationConfig:{temperature:0.2,maxOutputTokens:maxTokens,responseMimeType:'application/json'}
+          generationConfig:{temperature:0.2,maxOutputTokens:maxTokens,responseMimeType:'application/json',thinkingConfig:{thinkingLevel:'low'}}
         } : { model:activeModel, temperature:0.2, max_tokens:maxTokens, messages:[{role:'system',content:policy},{role:'user',content:context}] }),
         signal: AbortSignal.timeout(13000)
       });
@@ -162,3 +162,4 @@ async function handler(req, res) {
   }
 }
 module.exports = handler;
+
