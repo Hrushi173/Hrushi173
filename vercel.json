@@ -2,7 +2,9 @@
   "functions": {
     "api/[...route].js": {
       "maxDuration": 30
+    },
+    "api/ai.js": {
+      "maxDuration": 60
     }
   }
 }
-
