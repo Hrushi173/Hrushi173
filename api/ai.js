@@ -33,15 +33,20 @@ async function models(provider) {
   }).filter(x => /^[A-Za-z0-9._:/-]{2,120}$/.test(x.id) && /^(gemini|gemma)[-.:]/i.test(x.id) && !/(image|tts|transcri|embed|audio|live)/i.test(x.id)).slice(0, 40);
 }
 async function completion(provider, model, role, context, maxTokens = 500) {
-  const r = await fetch(provider.base + '/chat/completions', {
-    method: 'POST', headers: { authorization: 'Bearer ' + provider.key, 'content-type': 'application/json', accept: 'application/json' },
-    body: JSON.stringify({ model, temperature: 0.2, max_tokens: maxTokens, messages: [
-      { role: 'system', content: role + ' Use only supplied evidence. Explicitly label missing facts and uncertainty. Do not invent data, citations, catalysts, or price targets. Keep the report concise and decision-useful. This is research, not personalized financial advice.' },
-      { role: 'user', content: context }
-    ] }), signal: AbortSignal.timeout(22000)
+  const policy = role + ' Use only supplied evidence. Explicitly label missing facts and uncertainty. Do not invent data, citations, catalysts, or price targets. Keep the report concise and decision-useful. This is research, not personalized financial advice.';
+  const gemini = provider.name === 'Google Gemini';
+  const r = await fetch(gemini ? 'https://generativelanguage.googleapis.com/v1beta/models/' + encodeURIComponent(model) + ':generateContent' : provider.base + '/chat/completions', {
+    method: 'POST',
+    headers: { ...(gemini ? { 'x-goog-api-key':provider.key } : { authorization:'Bearer ' + provider.key }), 'content-type':'application/json', accept:'application/json' },
+    body: JSON.stringify(gemini ? {
+      system_instruction:{parts:[{text:policy}]},
+      contents:[{role:'user',parts:[{text:context}]}],
+      generationConfig:{temperature:0.2,maxOutputTokens:maxTokens}
+    } : { model, temperature:0.2, max_tokens:maxTokens, messages:[{role:'system',content:policy},{role:'user',content:context}] }),
+    signal: AbortSignal.timeout(22000)
   });
   if (!r.ok) { const e = new Error(provider.name + ' completion returned HTTP ' + r.status); e.gatewayStatus = r.status; throw e; }
-  const d = await r.json(), c = d.choices?.[0]?.message?.content;
+  const d = await r.json(), c = gemini ? d.candidates?.[0]?.content?.parts?.map(x=>x.text||'').join('') : d.choices?.[0]?.message?.content;
   const answer = Array.isArray(c) ? c.map(x => typeof x === 'string' ? x : x.text || '').join('') : String(c || '').trim();
   if (!answer) throw new Error('Empty agent response');
   return answer.slice(0, 9000);
@@ -135,3 +140,4 @@ async function handler(req, res) {
   }
 }
 module.exports = handler;
+
