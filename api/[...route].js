@@ -88,8 +88,77 @@ async function binanceChart(symbol,range){
   const last=candles[candles.length-1],previous=candles.length>1?candles[candles.length-2].close:null,price=Number(day?.lastPrice)||last.close,change=Number.isFinite(Number(day?.priceChange))?Number(day.priceChange):Number.isFinite(previous)?price-previous:null,changePercent=Number.isFinite(Number(day?.priceChangePercent))?Number(day.priceChangePercent):Number.isFinite(previous)&&previous?100*(price/previous-1):null;
   return{symbol,name:symbol.replace('USDT',' / USDT'),exchange:'Binance Spot',currency:'USDT',timestamp:Math.floor(Number(day?.closeTime||Date.now())/1000),price,change,changePercent,previous,volume:Number.isFinite(Number(day?.volume))?Number(day.volume):last.volume,high:Number(day?.highPrice)||last.high,low:Number(day?.lowPrice)||last.low,source:'Binance Spot',candles};
 }
+
+const AI_GATEWAY='https://co.agentrouter.org/v1';
+const AI_RATE=globalThis.__axiomAIRate||(globalThis.__axiomAIRate=new Map());
+function aiOriginAllowed(req){
+  const origin=String(req.headers?.origin||'');
+  return /^https:\/\/axiomdesk-market-terminal(?:-[a-z0-9-]+)?\.vercel\.app$/i.test(origin)||/^https?:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?$/i.test(origin);
+}
+function aiRateAllowed(req){
+  const ip=String(req.headers?.['x-forwarded-for']||req.socket?.remoteAddress||'unknown').split(',')[0].trim().slice(0,80);
+  const now=Date.now(),entry=AI_RATE.get(ip)||{minute:[],hour:[]};
+  entry.minute=entry.minute.filter(t=>now-t<60000);entry.hour=entry.hour.filter(t=>now-t<3600000);
+  if(entry.minute.length>=6||entry.hour.length>=40){AI_RATE.set(ip,entry);return false;}
+  entry.minute.push(now);entry.hour.push(now);AI_RATE.set(ip,entry);
+  if(AI_RATE.size>2000)for(const [key,val] of AI_RATE)if(!val.hour.length||now-val.hour.at(-1)>3600000)AI_RATE.delete(key);
+  return true;
+}
+async function getAgentRouterModels(){
+  const key=process.env.AGENTROUTER_API_KEY;if(!key)throw new Error('AI_NOT_CONFIGURED');
+  const response=await fetch(AI_GATEWAY+'/models',{headers:{authorization:'Bearer '+key,accept:'application/json'},signal:AbortSignal.timeout(18000)});
+  if(!response.ok)throw new Error('AgentRouter model list returned HTTP '+response.status);
+  const data=await response.json(),rows=Array.isArray(data.data)?data.data:[];
+  return rows.map(x=>({id:String(x.id||''),name:String(x.name||x.id||'')})).filter(x=>/^[A-Za-z0-9._:/-]{2,120}$/.test(x.id)).slice(0,150);
+}
+async function aiModels(req,res){
+  if(req.method!=='GET'){res.statusCode=405;return{error:'Method not allowed'};}
+  if(!aiOriginAllowed(req)){res.statusCode=403;return{error:'Request origin is not allowed'};}
+  try{return{models:await getAgentRouterModels()};}
+  catch(e){res.statusCode=e.message==='AI_NOT_CONFIGURED'?503:502;return{error:e.message==='AI_NOT_CONFIGURED'?'AI gateway is not configured':e.message};}
+}
+async function aiResearch(req,res){
+  if(req.method!=='POST'){res.statusCode=405;return{error:'Method not allowed'};}
+  if(!aiOriginAllowed(req)){res.statusCode=403;return{error:'Request origin is not allowed'};}
+  const key=process.env.AGENTROUTER_API_KEY;if(!key){res.statusCode=503;return{error:'AI gateway is not configured'};}
+  if(!aiRateAllowed(req)){res.statusCode=429;return{error:'AI request limit reached. Please wait before trying again.'};}
+  let body=req.body;
+  if(typeof body==='string'){try{body=JSON.parse(body)}catch{body=null}}
+  if(!body||typeof body!=='object'){res.statusCode=400;return{error:'Invalid request body'};}
+  const prompt=String(body.prompt||'').trim(),symbol=String(body.symbol||'').trim().toUpperCase(),model=String(body.model||'').trim();
+  if(!prompt||prompt.length>3500){res.statusCode=400;return{error:'Enter a question of up to 3,500 characters.'};}
+  if(!/^[A-Za-z0-9._:/-]{2,120}$/.test(model)){res.statusCode=400;return{error:'Choose a model from AgentRouter’s available model list.'};}
+  if(symbol&&!/^[A-Z0-9^=._-]{1,28}$/.test(symbol)){res.statusCode=400;return{error:'Enter a valid ticker symbol.'};}
+  let quoteData=null,newsData=[];
+  if(symbol){
+    const [q,nw]=await Promise.allSettled([quote(symbol),news(symbol)]);
+    if(q.status==='fulfilled'&&!q.value.error)quoteData=q.value;
+    if(nw.status==='fulfilled')newsData=nw.value.slice(0,6);
+  }
+  const facts=quoteData?{symbol:quoteData.symbol,name:quoteData.name,exchange:quoteData.exchange,currency:quoteData.currency,price:quoteData.price,changePercent:quoteData.changePercent,high:quoteData.high,low:quoteData.low,marketCap:quoteData.marketCap,pe:quoteData.pe,dividendYield:quoteData.dividendYield,asOf:quoteData.timestamp?new Date(quoteData.timestamp*1000).toISOString():null,source:quoteData.source}:null;
+  const headlines=newsData.map(n=>({title:n.title,publisher:n.publisher,publishedAt:n.publishedAt,url:n.url}));
+  const userContent=[
+    symbol?'Selected ticker: '+symbol:'No ticker selected.',
+    facts?'Public quote snapshot (provider fields only): '+JSON.stringify(facts):'No current quote snapshot was available.',
+    headlines.length?'Recent public headlines: '+JSON.stringify(headlines):'No recent public headlines were available.',
+    'User question: '+prompt
+  ].join('\n\n');
+  const messages=[
+    {role:'system',content:'You are AxiomDesk, a careful equity-research copilot. Separate supplied facts from interpretation, cite the supplied publisher/headline and date when relevant, state when data is missing, and do not invent company financials, events, or current prices. Treat potential news impact as a scenario, never a certainty or price target. Do not present personalized investment advice. The request includes only the selected ticker, provider-supplied public quote/headlines, and the user question; do not claim to have reviewed uploaded files or private model assumptions.'},
+    {role:'user',content:userContent}
+  ];
+  const response=await fetch(AI_GATEWAY+'/chat/completions',{method:'POST',headers:{authorization:'Bearer '+key,'content-type':'application/json',accept:'application/json'},body:JSON.stringify({model,messages,temperature:0.2,max_tokens:1400}),signal:AbortSignal.timeout(25000)});
+  if(!response.ok){res.statusCode=response.status===401||response.status===403?502:response.status===429?429:502;return{error:'AgentRouter request failed (HTTP '+response.status+'). Check the selected model and gateway account.'};}
+  const result=await response.json(),choice=result.choices?.[0]?.message?.content;
+  const answer=Array.isArray(choice)?choice.map(x=>typeof x==='string'?x:x.text||'').join(''):String(choice||'').trim();
+  if(!answer){res.statusCode=502;return{error:'The selected model returned an empty response.'};}
+  return{answer,model:result.model||model,sources:{quote:facts?.source||null,headlines:headlines.map(h=>({publisher:h.publisher,publishedAt:h.publishedAt,url:h.url}))},fetchedAt:Date.now()};
+}
+
 async function route(req,res){
   const u=new URL(req.url,'https://axiom.invalid'); const p=u.pathname;
+  if(p==='/api/ai/models')return await aiModels(req,res);
+  if(p==='/api/ai/chat')return await aiResearch(req,res);
   if(req.method!=='GET'){res.statusCode=405;return{error:'Method not allowed'};}
   if(p==='/health'||p==='/api/health')return{ok:true,service:'AxiomDesk Vercel data service',time:new Date().toISOString()};
   if(p==='/api/market'){

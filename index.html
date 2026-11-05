@@ -53,4 +53,4 @@ function applyFlow(frame){try{var doc=frame.contentDocument;if(!doc||!doc.head||
 function scan(){document.querySelectorAll('iframe').forEach(function(f){applyFlow(f);f.addEventListener('load',function(){applyFlow(f)},{once:true})})}
 new MutationObserver(scan).observe(document.documentElement,{childList:true,subtree:true});scan();setInterval(scan,1200);
 })();
-</script><script src="/axiom-research.js" defer></script><script src="/axiom-charts.js" defer></script></body></html>
+</script><script src="/axiom-research.js" defer></script><script src="/axiom-charts.js" defer></script><script src="/axiom-ai.js" defer></script></body></html>
