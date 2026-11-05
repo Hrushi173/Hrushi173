@@ -1,4 +1,5 @@
 const GATEWAY = 'https://co.agentrouter.org/v1';
+const GEMINI = 'https://generativelanguage.googleapis.com/v1beta/openai';
 const WINDOW = globalThis.__axiomTeamRate || (globalThis.__axiomTeamRate = new Map());
 
 function originAllowed(req) {
@@ -17,15 +18,20 @@ function rateAllowed(req) {
 }
 function send(res, status, body) { res.statusCode = status; res.setHeader('cache-control', 'no-store'); res.setHeader('content-type', 'application/json; charset=utf-8'); res.end(JSON.stringify(body)); }
 function bodyOf(req) { if (req.body && typeof req.body === 'object') return req.body; try { return JSON.parse(req.body || '{}'); } catch { return {}; } }
-async function models(key) {
-  const r = await fetch(GATEWAY + '/models', { headers: { authorization: 'Bearer ' + key, accept: 'application/json' }, signal: AbortSignal.timeout(15000) });
+function provider() {
+  if (process.env.GEMINI_API_KEY) return { key:process.env.GEMINI_API_KEY, base:GEMINI, name:'Google Gemini' };
+  if (process.env.AGENTROUTER_API_KEY) return { key:process.env.AGENTROUTER_API_KEY, base:GATEWAY, name:'AgentRouter' };
+  return null;
+}
+async function models(provider) {
+  const r = await fetch(provider.base + '/models', { headers: { authorization: 'Bearer ' + provider.key, accept: 'application/json' }, signal: AbortSignal.timeout(15000) });
   if (!r.ok) { const e = new Error('Gateway HTTP ' + r.status); e.gatewayStatus = r.status; throw e; }
   const d = await r.json();
   return (Array.isArray(d.data) ? d.data : []).map(x => ({ id: String(x.id || ''), name: String(x.name || x.id || '') })).filter(x => /^[A-Za-z0-9._:/-]{2,120}$/.test(x.id)).slice(0, 100);
 }
-async function completion(key, model, role, context, maxTokens = 500) {
-  const r = await fetch(GATEWAY + '/chat/completions', {
-    method: 'POST', headers: { authorization: 'Bearer ' + key, 'content-type': 'application/json', accept: 'application/json' },
+async function completion(provider, model, role, context, maxTokens = 500) {
+  const r = await fetch(provider.base + '/chat/completions', {
+    method: 'POST', headers: { authorization: 'Bearer ' + provider.key, 'content-type': 'application/json', accept: 'application/json' },
     body: JSON.stringify({ model, temperature: 0.2, max_tokens: maxTokens, messages: [
       { role: 'system', content: role + ' Use only supplied evidence. Explicitly label missing facts and uncertainty. Do not invent data, citations, catalysts, or price targets. Keep the report concise and decision-useful. This is research, not personalized financial advice.' },
       { role: 'user', content: context }
@@ -81,11 +87,11 @@ async function appData(origin, symbol, peers) {
 async function handler(req, res) {
   res.setHeader('cache-control', 'no-store');
   if (!originAllowed(req)) return send(res, 403, { error: 'Request origin is not allowed.' });
-  const key = process.env.AGENTROUTER_API_KEY;
-  if (!key) return send(res, 503, { error: 'AI gateway is not configured.' });
+  const aiProvider = provider();
+  if (!aiProvider) return send(res, 503, { error: 'AI provider is not configured.' });
   if (req.method === 'GET') {
-    try { return send(res, 200, { models: await models(key) }); }
-    catch (e) { return send(res, 502, { error: e.gatewayStatus ? 'AgentRouter model discovery returned HTTP ' + e.gatewayStatus + '.' : 'AgentRouter model discovery failed. Check gateway connectivity.' }); }
+    try { return send(res, 200, { provider:aiProvider.name, models: await models(aiProvider) }); }
+    catch (e) { return send(res, 502, { error: e.gatewayStatus ? aiProvider.name + ' model discovery returned HTTP ' + e.gatewayStatus + '.' : aiProvider.name + ' model discovery failed. Check provider connectivity.' }); }
   }
   if (req.method !== 'POST') return send(res, 405, { error: 'Use GET to list models or POST to run the research team.' });
   if (!rateAllowed(req)) return send(res, 429, { error: 'Research-team limit reached. Try again later.' });
@@ -94,7 +100,7 @@ async function handler(req, res) {
   if (!/^[A-Z0-9^=._-]{1,28}$/.test(symbol)) return send(res, 400, { error: 'Enter a ticker such as RELIANCE.NS, RELIANCE.BO, or AAPL.' });
   if (!/^[A-Za-z0-9._:/-]{2,120}$/.test(model)) return send(res, 400, { error: 'Choose a model from the available model list.' });
   try {
-    const available = await models(key);
+    const available = await models(aiProvider);
     if (!available.some(x => x.id === model)) return send(res, 400, { error: 'That model is not available for this gateway key.' });
     const origin = String(req.headers.origin || '');
     const peers = peerSymbols(symbol), data = await appData(origin, symbol, peers);
@@ -113,17 +119,16 @@ async function handler(req, res) {
       ['Trading risk manager','You are the trading risk manager agent. Use the supplied account size, risk percentage, risk budget, stop distance and share count. Check arithmetic, explain gap/slippage/overnight risk, and say if available data is insufficient to define a trade.']
     ];
     const reports = await Promise.all(roles.map(async ([name, role]) => {
-      try { return { name, status:'complete', report:await completion(key, model, role, prompt, 420) }; }
+      try { return { name, status:'complete', report:await completion(aiProvider, model, role, prompt, 420) }; }
       catch (e) { return { name, status:'unavailable', report:'Agent unavailable: provider request failed. No conclusion is supplied.' }; }
     }));
     const synthesisContext = JSON.stringify({ ticker:symbol, company:facts, forecastAndRisk:s, sourceErrors:data.errors, reports });
     let trader;
-    try { trader = await completion(key, model, 'You are the final paper-trading desk agent. Reconcile all reports, surface disagreement, and return: action (WATCH / PAPER LONG / PAPER SHORT / NO TRADE), conditional entry trigger, stop, target, reward:risk, thesis invalidation, and what to monitor during the '+days+'-session horizon. Never state that a live trade was executed. If evidence is weak, agents conflict, quote/history is incomplete, or data is stale, choose WATCH or NO TRADE. Do not override the deterministic risk limits.', synthesisContext, 600); }
+    try { trader = await completion(aiProvider, model, 'You are the final paper-trading desk agent. Reconcile all reports, surface disagreement, and return: action (WATCH / PAPER LONG / PAPER SHORT / NO TRADE), conditional entry trigger, stop, target, reward:risk, thesis invalidation, and what to monitor during the '+days+'-session horizon. Never state that a live trade was executed. If evidence is weak, agents conflict, quote/history is incomplete, or data is stale, choose WATCH or NO TRADE. Do not override the deterministic risk limits.', synthesisContext, 600); }
     catch (e) { trader = 'Final trader synthesis unavailable. Do not open a paper position; review the agent reports and deterministic risk values manually.'; }
-    return send(res, 200, { symbol, model, horizonDays:days, generatedAt:new Date().toISOString(), facts, historicalRisk:s, sector:sectorFor(symbol), reports, trader:{name:'Trader / portfolio manager',status:trader.startsWith('Final trader synthesis unavailable')?'unavailable':'complete',report:trader,paperOnly:true}, sources:{quote:facts.source||null,headlines:newsFacts.map(x=>({publisher:x.publisher,publishedAt:x.publishedAt,url:x.url}))}, dataCoverage:data.errors });
+    return send(res, 200, { symbol, model, provider:aiProvider.name, horizonDays:days, generatedAt:new Date().toISOString(), facts, historicalRisk:s, sector:sectorFor(symbol), reports, trader:{name:'Trader / portfolio manager',status:trader.startsWith('Final trader synthesis unavailable')?'unavailable':'complete',report:trader,paperOnly:true}, sources:{quote:facts.source||null,headlines:newsFacts.map(x=>({publisher:x.publisher,publishedAt:x.publishedAt,url:x.url}))}, dataCoverage:data.errors });
   } catch (e) {
     return send(res, 502, { error: 'The research team could not complete this run. Check the gateway/model and market-data connection, then retry.' });
   }
 }
 module.exports = handler;
-
