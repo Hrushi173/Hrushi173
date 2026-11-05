@@ -34,29 +34,42 @@ async function models(provider) {
   const rank = id => id === 'gemini-3.8-flash' ? 0 : /^gemini-3\.[0-9]+-flash(?:$|-)/.test(id) ? 1 : /flash/i.test(id) ? 2 : 3;
   return rows.sort((a,b)=>rank(a.id)-rank(b.id)||b.id.localeCompare(a.id)).slice(0,40);
 }
-async function completion(provider, model, role, context, maxTokens = 500) {
+async function completion(provider, model, role, context, maxTokens = 500, fallbackModel = null) {
   const policy = role + ' Use only supplied evidence. Explicitly label missing facts and uncertainty. Do not invent data, citations, catalysts, or price targets. Keep the report concise and decision-useful. This is research, not personalized financial advice.';
   const gemini = provider.name === 'Google Gemini';
-  const r = await fetch(gemini ? 'https://generativelanguage.googleapis.com/v1beta/models/' + encodeURIComponent(model) + ':generateContent' : provider.base + '/chat/completions', {
-    method: 'POST',
-    headers: { ...(gemini ? { 'x-goog-api-key':provider.key } : { authorization:'Bearer ' + provider.key }), 'content-type':'application/json', accept:'application/json' },
-    body: JSON.stringify(gemini ? {
-      system_instruction:{parts:[{text:policy}]},
-      contents:[{role:'user',parts:[{text:context}]}],
-      generationConfig:{temperature:0.2,maxOutputTokens:maxTokens}
-    } : { model, temperature:0.2, max_tokens:maxTokens, messages:[{role:'system',content:policy},{role:'user',content:context}] }),
-    signal: AbortSignal.timeout(22000)
-  });
-  if (!r.ok) {
-    const failure = await r.json().catch(() => ({}));
-    const detail = String(failure?.error?.message || '').replace(/[\r\n\t]+/g, ' ').replace(/(?:key|token)[=: ]+[A-Za-z0-9._-]{16,}/ig, '[redacted]').slice(0, 260);
-    const e = new Error(provider.name + ' completion returned HTTP ' + r.status + (detail ? ': ' + detail : ''));
-    e.gatewayStatus = r.status; throw e;
+  const choices = fallbackModel && fallbackModel !== model ? [model,fallbackModel] : [model];
+  let lastError;
+  for (let i=0;i<choices.length;i++) {
+    const activeModel=choices[i];
+    try {
+      const r = await fetch(gemini ? 'https://generativelanguage.googleapis.com/v1beta/models/' + encodeURIComponent(activeModel) + ':generateContent' : provider.base + '/chat/completions', {
+        method: 'POST',
+        headers: { ...(gemini ? { 'x-goog-api-key':provider.key } : { authorization:'Bearer ' + provider.key }), 'content-type':'application/json', accept:'application/json' },
+        body: JSON.stringify(gemini ? {
+          system_instruction:{parts:[{text:policy}]},
+          contents:[{role:'user',parts:[{text:context}]}],
+          generationConfig:{temperature:0.2,maxOutputTokens:maxTokens}
+        } : { model:activeModel, temperature:0.2, max_tokens:maxTokens, messages:[{role:'system',content:policy},{role:'user',content:context}] }),
+        signal: AbortSignal.timeout(10000)
+      });
+      if (!r.ok) {
+        const failure = await r.json().catch(() => ({}));
+        const detail = String(failure?.error?.message || '').replace(/[\r\n\t]+/g, ' ').replace(/(?:key|token)[=: ]+[A-Za-z0-9._-]{16,}/ig, '[redacted]').slice(0, 260);
+        const e = new Error(provider.name + ' completion returned HTTP ' + r.status + (detail ? ': ' + detail : ''));
+        e.gatewayStatus = r.status;
+        if (i+1<choices.length && [404,429,500,502,503,504].includes(r.status)) { lastError=e; continue; }
+        throw e;
+      }
+      const d = await r.json(), c = gemini ? d.candidates?.[0]?.content?.parts?.map(x=>x.text||'').join('') : d.choices?.[0]?.message?.content;
+      const answer = Array.isArray(c) ? c.map(x => typeof x === 'string' ? x : x.text || '').join('') : String(c || '').trim();
+      if (!answer) throw new Error('Empty agent response');
+      return { text:answer.slice(0,9000), model:activeModel };
+    } catch(e) {
+      lastError=e;
+      if (i+1>=choices.length || (e.gatewayStatus && ![404,429,500,502,503,504].includes(e.gatewayStatus))) throw e;
+    }
   }
-  const d = await r.json(), c = gemini ? d.candidates?.[0]?.content?.parts?.map(x=>x.text||'').join('') : d.choices?.[0]?.message?.content;
-  const answer = Array.isArray(c) ? c.map(x => typeof x === 'string' ? x : x.text || '').join('') : String(c || '').trim();
-  if (!answer) throw new Error('Empty agent response');
-  return answer.slice(0, 9000);
+  throw lastError || new Error('No model response was returned');
 }
 function stats(candles, price, days, capital, riskPct) {
   const cs = (candles || []).filter(x => [x.open, x.high, x.low, x.close].every(Number.isFinite)).slice(-100);
@@ -117,6 +130,9 @@ async function handler(req, res) {
   try {
     const available = await models(aiProvider);
     if (!available.some(x => x.id === model)) return send(res, 400, { error: 'That model is not available for this gateway key.' });
+    const flashModels=available.filter(x=>/^gemini-3\.[0-9]+-flash(?:$|-)/.test(x.id));
+    const modelIndex=flashModels.findIndex(x=>x.id===model);
+    const fallbackModel=modelIndex>=0?flashModels[modelIndex+1]?.id:flashModels[0]?.id;
     const origin = String(req.headers.origin || '');
     const peers = peerSymbols(symbol), data = await appData(origin, symbol, peers);
     const root = symbol.replace(/\.(NS|BO)$/i, ''), quote = data.quotes.find(x => String(x.symbol).toUpperCase() === symbol) || data.quotes[0];
@@ -134,17 +150,17 @@ async function handler(req, res) {
       ['Trading risk manager','You are the trading risk manager agent. Use the supplied account size, risk percentage, risk budget, stop distance and share count. Check arithmetic, explain gap/slippage/overnight risk, and say if available data is insufficient to define a trade.']
     ];
     const reports = await Promise.all(roles.map(async ([name, role]) => {
-      try { return { name, status:'complete', report:await completion(aiProvider, model, role, prompt, 420) }; }
+      try { const result=await completion(aiProvider, model, role, prompt, 420, fallbackModel); return { name, status:'complete', model:result.model, report:result.text }; }
       catch (e) { return { name, status:'unavailable', report:'Agent unavailable: ' + e.message + '. No conclusion is supplied.' }; }
     }));
     const synthesisContext = JSON.stringify({ ticker:symbol, company:facts, forecastAndRisk:s, sourceErrors:data.errors, reports });
     let trader;
-    try { trader = await completion(aiProvider, model, 'You are the final paper-trading desk agent. Reconcile all reports, surface disagreement, and return: action (WATCH / PAPER LONG / PAPER SHORT / NO TRADE), conditional entry trigger, stop, target, reward:risk, thesis invalidation, and what to monitor during the '+days+'-session horizon. Never state that a live trade was executed. If evidence is weak, agents conflict, quote/history is incomplete, or data is stale, choose WATCH or NO TRADE. Do not override the deterministic risk limits.', synthesisContext, 600); }
+    let traderModel=model;
+    try { const result=await completion(aiProvider, model, 'You are the final paper-trading desk agent. Reconcile all reports, surface disagreement, and return: action (WATCH / PAPER LONG / PAPER SHORT / NO TRADE), conditional entry trigger, stop, target, reward:risk, thesis invalidation, and what to monitor during the '+days+'-session horizon. Never state that a live trade was executed. If evidence is weak, agents conflict, quote/history is incomplete, or data is stale, choose WATCH or NO TRADE. Do not override the deterministic risk limits.', synthesisContext, 600, fallbackModel); trader=result.text; traderModel=result.model; }
     catch (e) { trader = 'Final trader synthesis unavailable: ' + e.message + '. Do not open a paper position; review the agent reports and deterministic risk values manually.'; }
-    return send(res, 200, { symbol, model, provider:aiProvider.name, horizonDays:days, generatedAt:new Date().toISOString(), facts, historicalRisk:s, sector:sectorFor(symbol), reports, trader:{name:'Trader / portfolio manager',status:trader.startsWith('Final trader synthesis unavailable')?'unavailable':'complete',report:trader,paperOnly:true}, sources:{quote:facts.source||null,headlines:newsFacts.map(x=>({publisher:x.publisher,publishedAt:x.publishedAt,url:x.url}))}, dataCoverage:data.errors });
+    return send(res, 200, { symbol, model, provider:aiProvider.name, horizonDays:days, generatedAt:new Date().toISOString(), facts, historicalRisk:s, sector:sectorFor(symbol), reports, trader:{name:'Trader / portfolio manager',model:traderModel,status:trader.startsWith('Final trader synthesis unavailable')?'unavailable':'complete',report:trader,paperOnly:true}, sources:{quote:facts.source||null,headlines:newsFacts.map(x=>({publisher:x.publisher,publishedAt:x.publishedAt,url:x.url}))}, dataCoverage:data.errors });
   } catch (e) {
     return send(res, 502, { error: 'The research team could not complete this run. Check the gateway/model and market-data connection, then retry.' });
   }
 }
 module.exports = handler;
-
