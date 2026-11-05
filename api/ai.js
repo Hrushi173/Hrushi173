@@ -3,7 +3,9 @@ const WINDOW = globalThis.__axiomTeamRate || (globalThis.__axiomTeamRate = new M
 
 function originAllowed(req) {
   const origin = String(req.headers?.origin || '');
-  return /^https:\/\/axiomdesk-market-terminal(?:-[a-z0-9-]+)?\.vercel\.app$/i.test(origin) || /^https?:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?$/i.test(origin);
+  const appOrigin = /^https:\/\/axiomdesk-market-terminal(?:-[a-z0-9-]+)?\.vercel\.app$/i;
+  if (!origin && req.method === 'GET') return appOrigin.test('https://' + String(req.headers?.host || ''));
+  return appOrigin.test(origin) || /^https?:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?$/i.test(origin);
 }
 function rateAllowed(req) {
   const ip = String(req.headers?.['x-forwarded-for'] || req.socket?.remoteAddress || 'unknown').split(',')[0].trim().slice(0, 80);
