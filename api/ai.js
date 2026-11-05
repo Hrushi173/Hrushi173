@@ -48,9 +48,9 @@ async function completion(provider, model, role, context, maxTokens = 500, fallb
         body: JSON.stringify(gemini ? {
           system_instruction:{parts:[{text:policy}]},
           contents:[{role:'user',parts:[{text:context}]}],
-          generationConfig:{temperature:0.2,maxOutputTokens:maxTokens}
+          generationConfig:{temperature:0.2,maxOutputTokens:maxTokens,responseMimeType:'application/json'}
         } : { model:activeModel, temperature:0.2, max_tokens:maxTokens, messages:[{role:'system',content:policy},{role:'user',content:context}] }),
-        signal: AbortSignal.timeout(10000)
+        signal: AbortSignal.timeout(13000)
       });
       if (!r.ok) {
         const failure = await r.json().catch(() => ({}));
@@ -142,23 +142,21 @@ async function handler(req, res) {
     const newsFacts = data.news.slice(0, 8).map(x => ({ title:x.title, publisher:x.publisher, publishedAt:x.publishedAt, url:x.url, summary:x.summary }));
     const facts = { symbol, company:quote.name, exchange:quote.exchange, sector:quote.sector || sectorFor(symbol), currency:quote.currency, price:quote.price, changePercent:quote.changePercent, marketCap:quote.marketCap, pe:quote.pe, dividendYield:quote.dividendYield, rsi14:quote.rsi14, sma20:s.sma20, sma50:s.sma50, sma200:s.sma200, atr14:s.atr14, source:quote.source, timestamp:quote.timestamp };
     const shared = JSON.stringify({ company:facts, peerSnapshot:peerFacts, headlines:newsFacts, horizonDays:days, historicalRisk:s, coverage:data.errors });
-    const prompt = 'Ticker '+symbol+'; build a concise sector/peer screen. Compare only supplied peer snapshot fields, identify sector classification confidence, note missing peers or fields; no unverified company claims.\n\n'+shared;
-    const roles = [
-      ['Sector screener','You are the sector screener agent.'],
-      ['Fundamental analyst','You are the fundamental analyst agent. Assess only supplied market fundamentals. Explicitly say if income statement, balance sheet, and cash flow data are absent; do not infer intrinsic value without them.'],
-      ['Technical analyst','You are the technical analyst agent. Interpret supplied price, RSI, moving averages, ATR and historical volatility. Give a conditional '+days+'-session outlook; distinguish a statistical range from a directional forecast.'],
-      ['Trading risk manager','You are the trading risk manager agent. Use the supplied account size, risk percentage, risk budget, stop distance and share count. Check arithmetic, explain gap/slippage/overnight risk, and say if available data is insufficient to define a trade.']
-    ];
-    const reports = await Promise.all(roles.map(async ([name, role]) => {
-      try { const result=await completion(aiProvider, model, role, prompt, 420, fallbackModel); return { name, status:'complete', model:result.model, report:result.text }; }
-      catch (e) { return { name, status:'unavailable', report:'Agent unavailable: ' + e.message + '. No conclusion is supplied.' }; }
-    }));
-    const synthesisContext = JSON.stringify({ ticker:symbol, company:facts, forecastAndRisk:s, sourceErrors:data.errors, reports });
-    let trader;
-    let traderModel=model;
-    try { const result=await completion(aiProvider, model, 'You are the final paper-trading desk agent. Reconcile all reports, surface disagreement, and return: action (WATCH / PAPER LONG / PAPER SHORT / NO TRADE), conditional entry trigger, stop, target, reward:risk, thesis invalidation, and what to monitor during the '+days+'-session horizon. Never state that a live trade was executed. If evidence is weak, agents conflict, quote/history is incomplete, or data is stale, choose WATCH or NO TRADE. Do not override the deterministic risk limits.', synthesisContext, 600, fallbackModel); trader=result.text; traderModel=result.model; }
-    catch (e) { trader = 'Final trader synthesis unavailable: ' + e.message + '. Do not open a paper position; review the agent reports and deterministic risk values manually.'; }
-    return send(res, 200, { symbol, model, provider:aiProvider.name, horizonDays:days, generatedAt:new Date().toISOString(), facts, historicalRisk:s, sector:sectorFor(symbol), reports, trader:{name:'Trader / portfolio manager',model:traderModel,status:trader.startsWith('Final trader synthesis unavailable')?'unavailable':'complete',report:trader,paperOnly:true}, sources:{quote:facts.source||null,headlines:newsFacts.map(x=>({publisher:x.publisher,publishedAt:x.publishedAt,url:x.url}))}, dataCoverage:data.errors });
+    const rolePrompt = 'Coordinate five specialist research roles on ticker '+symbol+'. Review supplied data, then produce four concise, distinct reports in this order: (1) Sector Screener compares only supplied peer fields and states classification confidence; (2) Fundamental Analyst assesses only available facts and explicitly says when income statement, balance sheet, or cash flow statements are missing; do not infer intrinsic value without them; (3) Technical Analyst gives a conditional '+days+'-session view from price, RSI, moving averages, ATR and realized volatility, separating a statistical range from directional opinion; (4) Trading Risk Manager checks the supplied paper account, risk percentage, risk budget, stop distance, share count, and gap/slippage risk. Then Trader / Portfolio Manager reconciles those reports, notes disagreement, and returns action WATCH, PAPER LONG, PAPER SHORT, or NO TRADE; a conditional trigger, stop, target, reward:risk, invalidation, and monitoring checklist. If evidence is weak, incomplete, stale or contradictory, choose WATCH or NO TRADE. Never claim a live order was submitted. Use only supplied evidence, label missing facts, and do not invent citations.\nReturn only valid JSON: {"reports":[{"name":"Sector screener","report":"..."},{"name":"Fundamental analyst","report":"..."},{"name":"Technical analyst","report":"..."},{"name":"Trading risk manager","report":"..."}],"trader":"..."}. Do not add markdown fences. Data: '+shared;
+    let reports=[],trader='',traderModel=model;
+    try {
+      const result=await completion(aiProvider, model, 'You are a careful equity research committee. Follow the five specialist roles and return the requested JSON only. This is research, not personalized financial advice.', rolePrompt, 1900, fallbackModel);
+      traderModel=result.model;
+      const match=result.text.match(/\{[\s\S]*\}/),team=match?JSON.parse(match[0]):null;
+      const names=['Sector screener','Fundamental analyst','Technical analyst','Trading risk manager'];
+      reports=names.map(name=>{const x=Array.isArray(team?.reports)?team.reports.find(a=>String(a.name||'').toLowerCase()===name.toLowerCase()):null;return{name,status:x&&x.report?'complete':'unavailable',model:result.model,report:x&&x.report?String(x.report):'The coordinated response did not return this specialist report.'};});
+      trader=String(team?.trader||'');
+      if(!trader)throw new Error('Trader synthesis missing from model response');
+    } catch(e) {
+      reports=[{name:'Research committee',status:'unavailable',model:traderModel,report:'The specialist review did not complete: '+e.message+'.'}];
+      trader='NO TRADE. The committee review did not complete; do not open a paper position. Retry when model capacity is available.';
+    }
+    return send(res, 200, { symbol, model:traderModel, provider:aiProvider.name, horizonDays:days, generatedAt:new Date().toISOString(), facts, historicalRisk:s, sector:sectorFor(symbol), reports, trader:{name:'Trader / portfolio manager',model:traderModel,status:reports.every(x=>x.status==='complete')?'complete':'unavailable',report:trader,paperOnly:true}, sources:{quote:facts.source||null,headlines:newsFacts.map(x=>({publisher:x.publisher,publishedAt:x.publishedAt,url:x.url}))}, dataCoverage:data.errors });
   } catch (e) {
     return send(res, 502, { error: 'The research team could not complete this run. Check the gateway/model and market-data connection, then retry.' });
   }
