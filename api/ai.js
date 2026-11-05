@@ -50,7 +50,7 @@ async function completion(provider, model, role, context, maxTokens = 500, fallb
           contents:[{role:'user',parts:[{text:context}]}],
           generationConfig:{temperature:0.2,maxOutputTokens:maxTokens,responseMimeType:'application/json',thinkingConfig:{thinkingLevel:'low'}}
         } : { model:activeModel, temperature:0.2, max_tokens:maxTokens, messages:[{role:'system',content:policy},{role:'user',content:context}] }),
-        signal: AbortSignal.timeout(13000)
+        signal: AbortSignal.timeout(32000)
       });
       if (!r.ok) {
         const failure = await r.json().catch(() => ({}));
@@ -66,7 +66,7 @@ async function completion(provider, model, role, context, maxTokens = 500, fallb
       return { text:answer.slice(0,9000), model:activeModel };
     } catch(e) {
       lastError=e;
-      if (i+1>=choices.length || (e.gatewayStatus && ![404,429,500,502,503,504].includes(e.gatewayStatus))) throw e;
+      if (i+1>=choices.length || !e.gatewayStatus || ![404,429,500,502,503,504].includes(e.gatewayStatus)) throw e;
     }
   }
   throw lastError || new Error('No model response was returned');
