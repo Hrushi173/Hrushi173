@@ -5,6 +5,9 @@
     },
     "api/ai.js": {
       "maxDuration": 60
+    },
+    "api/agents.js": {
+      "maxDuration": 30
     }
   }
 }
